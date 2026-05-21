@@ -1,76 +1,100 @@
 import cv2
-import mediapipe as mp
+import json
+import numpy as np
 import streamlit as st
-from streamlit_webrtc import WebRtcMode, webrtc_streamer
+from websocket import create_connection
 
-# Set up clean web page configuration
-st.set_page_config(page_title="AI Hand Tracker", layout="wide")
+from streamlit_webrtc import webrtc_streamer, WebRtcMode
 
-st.title("🤖 Real-Time AI Hand Tracker")
-st.markdown("Welcome to your first Computer Vision web app! Allow webcam access below to see the tracking in action.")
+# Page Setup & Aesthetic Polish
+st.set_page_config(page_title="AI Air Canvas", layout="wide")
+st.title("🎨 Interactive AI Air Canvas")
+st.markdown("Frontend: **Pakistan (Streamlit)** | Backend: **Germany (FastAPI)**")
 
-# Sidebar controls for user interaction
-st.sidebar.header("Control Panel")
-max_hands = st.sidebar.slider("Maximum Hands to Track", min_value=1, max_value=4, value=2)
-detection_confidence = st.sidebar.slider("Detection Confidence", min_value=0.0, max_value=1.0, value=0.7, step=0.05)
+# 1. Sidebar Panel Layout Configuration Elements
+st.sidebar.header("Canvas Settings")
+brush_color = st.sidebar.color_picker("Select Paint Color", "#FF0000")  # Defaults to Red
+brush_thickness = st.sidebar.slider("Brush Thickness", 2, 20, 6)
 
-# Initialize MediaPipe components globally for drawing
-mp_hands = mp.solutions.hands
-mp_drawing = mp.solutions.drawing_utils
+# Translate hex color selector string layout to OpenCV BGR color layouts
+hex_color = brush_color.lstrip('#')
+bgr_color = tuple(int(hex_color[i:i + 2], 16) for i in (4, 2, 0))
+
+# 2. Managing Shared Canvas Drawing State Memories
+if "canvas" not in st.session_state:
+    st.session_state.canvas = None
+if "prev_point" not in st.session_state:
+    st.session_state.prev_point = None
+
+if st.sidebar.button("Clear Canvas", use_container_width=True):
+    st.session_state.canvas = None
+    st.session_state.prev_point = None
+    st.rerun()
+
+# 3. Setup Networking WebSocket Connection Address Links
+# Paste your active running Ngrok WSS address directly in between these quotes!
+NGROK_URL = "wss://unknowing-goatskin-herring.ngrok-free.dev/ws/process"
+
+if "ws_conn" not in st.session_state:
+    try:
+        st.session_state.ws_conn = create_connection(NGROK_URL)
+        st.sidebar.success("⚡ Connected to Germany AI Backend!")
+    except Exception as e:
+        st.sidebar.error("❌ Awaiting connection to Germany Backend...")
+        st.session_state.ws_conn = None
 
 
-# This core function processes the video frame-by-frame inside the browser stream
+# 4. The Live Frame Capture Loop Callback
 def video_frame_callback(frame):
     img = frame.to_ndarray(format="bgr24")
+    img = cv2.flip(img, 1)  # Natural mirrored visual effect
+    h, w, _ = img.shape
 
-    # Mirror effect
-    img = cv2.flip(img, 1)
+    # Instantiate clean drawing board matrix layers if empty
+    if st.session_state.canvas is None or st.session_state.canvas.shape != img.shape:
+        st.session_state.canvas = np.zeros_like(img)
 
-    # Initialize the model INSIDE the frame processing or globally.
-    # Note: For best practice with dynamic sliders in webrtc, we spin it up inside the context
-    # or keep it persistent. To keep it simple and reactive to your sidebar sliders:
-    with mp_hands.Hands(
-            max_num_hands=max_hands,
-            min_detection_confidence=detection_confidence,
-            min_tracking_confidence=0.7
-    ) as hands:
+    # Stream frames over the socket connection network tunnel if active
+    if st.session_state.ws_conn is not None:
+        try:
+            # Compress array matrix data configurations to lightweight JPEGs
+            _, jpeg_buffer = cv2.imencode('.jpg', img)
+            st.session_state.ws_conn.send_binary(jpeg_buffer.tobytes())
 
-        # Convert color spaces for AI engine
-        rgb_frame = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        results = hands.process(rgb_frame)
+            # Catch incoming processed AI vector positions
+            result = st.session_state.ws_conn.recv()
+            data = json.loads(result)
 
-        # If landmarks are found, overlay the skeleton map
-        if results.multi_hand_landmarks:
-            for hand_landmarks in results.multi_hand_landmarks:
-                mp_drawing.draw_landmarks(
-                    img,
-                    hand_landmarks,
-                    mp_hands.HAND_CONNECTIONS
-                )
+            if data["detected"]:
+                cx, cy = int(data["x"] * w), int(data["y"] * h)
 
-    return frame.from_ndarray(img, format="bgr24")
+                if data["drawing"]:
+                    if st.session_state.prev_point is not None:
+                        # Draw vector line stroke structures
+                        cv2.line(st.session_state.canvas, st.session_state.prev_point, (cx, cy), bgr_color,
+                                 brush_thickness)
+                    st.session_state.prev_point = (cx, cy)
+                else:
+                    st.session_state.prev_point = None
+
+                # Render a visual reticle circle at the current tracking pointer location
+                cv2.circle(img, (cx, cy), 8, (0, 0, 255), -1)
+            else:
+                st.session_state.prev_point = None
+
+        except Exception:
+            pass
+
+    # Blend original raw video and digital ink overlay layers together
+    final_output = cv2.addWeighted(img, 1.0, st.session_state.canvas, 1.0, 0)
+    return frame.from_ndarray(final_output, format="bgr24")
 
 
-# Layout separation using columns
-col1, col2 = st.columns([2, 1])
-
-with col1:
-    st.subheader("Live WebRTC Video Stream")
-    # CHANGED: mode shifted to SENDRECV so it asks for your webcam permission
-    webrtc_streamer(
-        key="hand-pose-detection",
-        mode=WebRtcMode.SENDRECV,
-        video_frame_callback=video_frame_callback,
-        media_stream_constraints={"video": True, "audio": False},
-        async_processing=True,
-    )
-
-with col2:
-    st.subheader("System Status")
-    st.info("The AI engine is ready. Adjust the sidebar parameters to change confidence scaling on the fly.")
-    st.markdown("""
-    ### How to test:
-    1. Click the **Start** button in the video player.
-    2. Grant your browser permission to use your camera.
-    3. Hold up your hands!
-    """)
+# 5. Native Browser WebRTC Hardware Hook Stream Renderers
+webrtc_streamer(
+    key="air-canvas-streamer",
+    mode=WebRtcMode.VIDEORECVONLY,
+    video_frame_callback=video_frame_callback,
+    media_stream_constraints={"video": True, "audio": False},
+    async_processing=True,
+)
