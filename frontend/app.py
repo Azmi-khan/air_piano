@@ -37,7 +37,7 @@ st.components.v1.html(f"""
         function playNote(freq) {{
             if (audioCtx.state === 'suspended') {{
                 audioCtx.resume();
-            }
+            }}
             var osc = audioCtx.createOscillator();
             var gainNode = audioCtx.createGain();
             osc.type = "sine";
