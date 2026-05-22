@@ -1,0 +1,6 @@
+fastapi
+uvicorn[standard]
+mediapipe==0.10.14
+numpy<2.0.0
+opencv-python-headless
+msvc-runtime; sys_platform == 'win32'
