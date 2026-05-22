@@ -2,9 +2,17 @@ import cv2
 import json
 import numpy as np
 import streamlit as st
-import winsound  # Built-in Windows hardware audio engine
 from websocket import create_connection
 from streamlit_webrtc import webrtc_streamer, WebRtcMode
+
+# --- TEST PLATFORM FOR WINSOUND Safely ---
+# This prevents the Linux cloud server from crashing on boot!
+try:
+    import winsound
+
+    IS_WINDOWS = True
+except ImportError:
+    IS_WINDOWS = False
 
 st.set_page_config(page_title="AI Air Piano", layout="wide")
 st.title("🎹 Interactive AI Air Piano Workspace")
@@ -12,9 +20,6 @@ st.markdown("Hover your finger over a key at the top and **pinch** your thumb an
 
 NGROK_URL = "wss://unknowing-goatskin-herring.ngrok-free.dev/ws/process"
 
-# --- THREAD-SAFE GLOBAL INITIALIZATION ---
-# Using Python's native globals dictionary keeps this connection completely independent
-# of Streamlit's strict thread checking rules.
 if "piano_ws" not in globals():
     global piano_ws, last_note
     last_note = None
@@ -25,12 +30,11 @@ if "piano_ws" not in globals():
         st.sidebar.error("❌ Connecting to backend...")
         piano_ws = None
 
-# Pure Python mapping for Windows hardware beep frequencies (Hz)
 NOTE_FREQS = {"C4": 261, "D4": 294, "E4": 330, "F4": 349}
 
 
 def video_frame_callback(frame):
-    global piano_ws, last_note  # Pull pure Python references, NO st.session_state allowed here!
+    global piano_ws, last_note
 
     img = frame.to_ndarray(format="bgr24")
     img = cv2.flip(img, 1)
@@ -44,14 +48,11 @@ def video_frame_callback(frame):
         cv2.putText(img, note, (i * key_w + int(key_w * 0.4), int(h * 0.13)),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
 
-    # Process and stream the video data over our global connection object
     if piano_ws is not None:
         try:
-            # 1. Compress matrix array frame to lightweight JPEG bytes
             _, jpeg_buffer = cv2.imencode('.jpg', img)
             piano_ws.send_binary(jpeg_buffer.tobytes())
 
-            # 2. Wait for backend calculation matrix coordinates
             result = piano_ws.recv()
             data = json.loads(result)
 
@@ -59,13 +60,17 @@ def video_frame_callback(frame):
                 cx, cy = int(data["x"] * w), int(data["y"] * h)
                 cv2.circle(img, (cx, cy), 8, (0, 255, 0), -1)
 
-                # 3. Handle real-time audio playback natively within the thread
                 detected_note = data.get("note")
                 if detected_note and detected_note != last_note:
                     freq = NOTE_FREQS.get(detected_note)
                     if freq:
-                        # Beep(frequency_hz, duration_ms)
-                        winsound.Beep(freq, 150)
+                        # If running locally on Windows, use system hardware beep
+                        if IS_WINDOWS:
+                            winsound.Beep(freq, 150)
+                        else:
+                            # Natively triggers a clean standard terminal ring sound on Linux cloud hosts
+                            print('\a', end='', flush=True)
+
                     last_note = detected_note
                 elif not detected_note:
                     last_note = None
@@ -73,12 +78,11 @@ def video_frame_callback(frame):
                 last_note = None
 
         except Exception:
-            pass  # Keep processing frames smoothly if a packet drops
+            pass
 
     return frame.from_ndarray(img, format="bgr24")
 
 
-# --- NATIVE BROWSER WEBRTC hardware renderer ---
 webrtc_streamer(
     key="air-piano-streamer",
     mode=WebRtcMode.SENDRECV,
