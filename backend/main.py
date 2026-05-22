@@ -3,8 +3,17 @@ import json
 import numpy as np
 import mediapipe as mp
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 
 app=FastAPI(title= "AI air piano - backend engine")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],             # Allows traffic from any global network origin
+    allow_credentials=True,
+    allow_methods=["*"],             # Allows all global request types
+    allow_headers=["*"],             # Allows all tracking headers
+)
 mp_hands = mp.solutions.hands
 hands = mp_hands.Hands(
     static_image_mode=False,
@@ -17,7 +26,7 @@ hands = mp_hands.Hands(
 def home_check():
     """checking if the server is running"""
     return {"message": "german Server is running"}
-@app.websocket("/ws/testing")
+@app.websocket("/ws/process")
 async def websocket_endpoint(websocket: WebSocket):
     """websocket test"""
     await websocket.accept()
