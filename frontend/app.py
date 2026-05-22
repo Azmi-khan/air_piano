@@ -2,6 +2,7 @@ import cv2
 import json
 import numpy as np
 import streamlit as st
+import winsound  # Built-in Windows hardware audio engine
 from websocket import create_connection
 from streamlit_webrtc import webrtc_streamer, WebRtcMode
 
@@ -9,53 +10,33 @@ st.set_page_config(page_title="AI Air Piano", layout="wide")
 st.title("🎹 Interactive AI Air Piano Workspace")
 st.markdown("Hover your finger over a key at the top and **pinch** your thumb and index finger to play!")
 
-# --- INJECT THE PIANO SYNTHESIZER DIRECTLY INTO THE WEB PAGE ONCE ---
-# This exposes a global 'window.playPianoNote(frequency)' function to the browser session.
-st.components.v1.html("""
-    <script>
-        var audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-        window.playPianoNote = function(frequency) {
-            if (audioCtx.state === 'suspended') {
-                audioCtx.resume();
-            }
-            var osc = audioCtx.createOscillator();
-            var gainNode = audioCtx.createGain();
-
-            osc.type = "sine";
-            osc.frequency.setValueAtTime(frequency, audioCtx.currentTime);
-
-            gainNode.gain.setValueAtTime(0.1, audioCtx.currentTime);
-            gainNode.gain.exponentialRampToValueAtTime(0.00001, audioCtx.currentTime + 0.3);
-
-            osc.connect(gainNode);
-            gainNode.connect(audioCtx.destination);
-
-            osc.start();
-            osc.stop(audioCtx.currentTime + 0.3);
-        };
-    </script>
-""", height=0)
-
 NGROK_URL = "wss://unknowing-goatskin-herring.ngrok-free.dev/ws/process"
 
-if "global_ws" not in globals():
-    global global_ws, last_played_note
-    last_played_note = None
+# --- THREAD-SAFE GLOBAL INITIALIZATION ---
+# Using Python's native globals dictionary keeps this connection completely independent
+# of Streamlit's strict thread checking rules.
+if "piano_ws" not in globals():
+    global piano_ws, last_note
+    last_note = None
     try:
-        global_ws = create_connection(NGROK_URL)
-        st.sidebar.success("⚡ Audio Pipeline active!")
-    except Exception:
+        piano_ws = create_connection(NGROK_URL)
+        st.sidebar.success("⚡ Audio Pipeline Connected globally!")
+    except Exception as e:
         st.sidebar.error("❌ Connecting to backend...")
-        global_ws = None
+        piano_ws = None
+
+# Pure Python mapping for Windows hardware beep frequencies (Hz)
+NOTE_FREQS = {"C4": 261, "D4": 294, "E4": 330, "F4": 349}
 
 
 def video_frame_callback(frame):
-    global global_ws, last_played_note
+    global piano_ws, last_note  # Pull pure Python references, NO st.session_state allowed here!
+
     img = frame.to_ndarray(format="bgr24")
     img = cv2.flip(img, 1)
     h, w, _ = img.shape
 
-    # --- DRAW THE PIANO KEYS OVERLAY ---
+    # --- DRAW THE PIANO KEYS VISUAL OVERLAY ---
     key_w = w // 4
     keys = ["C4", "D4", "E4", "F4"]
     for i, note in enumerate(keys):
@@ -63,37 +44,41 @@ def video_frame_callback(frame):
         cv2.putText(img, note, (i * key_w + int(key_w * 0.4), int(h * 0.13)),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
 
-    if global_ws is not None:
+    # Process and stream the video data over our global connection object
+    if piano_ws is not None:
         try:
+            # 1. Compress matrix array frame to lightweight JPEG bytes
             _, jpeg_buffer = cv2.imencode('.jpg', img)
-            global_ws.send_binary(jpeg_buffer.tobytes())
+            piano_ws.send_binary(jpeg_buffer.tobytes())
 
-            result = global_ws.recv()
+            # 2. Wait for backend calculation matrix coordinates
+            result = piano_ws.recv()
             data = json.loads(result)
 
             if data["detected"]:
                 cx, cy = int(data["x"] * w), int(data["y"] * h)
                 cv2.circle(img, (cx, cy), 8, (0, 255, 0), -1)
 
-                current_note = data.get("note")
-                if current_note and current_note != last_played_note:
-                    # Map notes to frequencies
-                    frequencies = {"C4": 261.63, "D4": 293.66, "E4": 329.63, "F4": 349.23}
-                    if current_note in frequencies:
-                        # Send a direct frame metadata flag or fallback to executing it natively
-                        pass
-                    last_played_note = current_note
-                elif not current_note:
-                    last_played_note = None
+                # 3. Handle real-time audio playback natively within the thread
+                detected_note = data.get("note")
+                if detected_note and detected_note != last_note:
+                    freq = NOTE_FREQS.get(detected_note)
+                    if freq:
+                        # Beep(frequency_hz, duration_ms)
+                        winsound.Beep(freq, 150)
+                    last_note = detected_note
+                elif not detected_note:
+                    last_note = None
             else:
-                last_played_note = None
+                last_note = None
 
         except Exception:
-            pass
+            pass  # Keep processing frames smoothly if a packet drops
 
     return frame.from_ndarray(img, format="bgr24")
 
 
+# --- NATIVE BROWSER WEBRTC hardware renderer ---
 webrtc_streamer(
     key="air-piano-streamer",
     mode=WebRtcMode.SENDRECV,
