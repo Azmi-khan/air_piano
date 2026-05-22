@@ -1,92 +1,104 @@
-import cv2
-import json
-import numpy as np
 import streamlit as st
-from websocket import create_connection
 from streamlit_webrtc import webrtc_streamer, WebRtcMode
 
-# --- TEST PLATFORM FOR WINSOUND Safely ---
-# This prevents the Linux cloud server from crashing on boot!
-try:
-    import winsound
+st.set_page_config(page_title="AI Air Piano Workspace", layout="wide")
+st.title("🎹 Live AI Air Piano Console")
+st.markdown("### Hand-Tracking Musical Canvas")
 
-    IS_WINDOWS = True
-except ImportError:
-    IS_WINDOWS = False
-
-st.set_page_config(page_title="AI Air Piano", layout="wide")
-st.title("🎹 Interactive AI Air Piano Workspace")
-st.markdown("Hover your finger over a key at the top and **pinch** your thumb and index finger to play!")
-
+# UPDATE THIS TO YOUR CURRENT SECURE NGROK LINK BEFORE PUSHING TO GITHUB!
 NGROK_URL = "wss://unknowing-goatskin-herring.ngrok-free.dev/ws/process"
 
-if "piano_ws" not in globals():
-    global piano_ws, last_note
-    last_note = None
-    try:
-        piano_ws = create_connection(NGROK_URL)
-        st.sidebar.success("⚡ Audio Pipeline Connected globally!")
-    except Exception as e:
-        st.sidebar.error("❌ Connecting to backend...")
-        piano_ws = None
+# --- THE JAVASCRIPT WEBRTC + AUDIO NETWORKING BRIDGE ---
+# This runs completely inside her web browser, bypassing the Linux server limits entirely!
+st.components.v1.html(f"""
+    <div style="background-color: #1e1e1e; padding: 15px; border-radius: 8px; color: white; margin-bottom: 20px;">
+        <h4 style="margin: 0 0 10px 0;">🎙️ Status: <span id="status" style="color: #ffaa00;">Initializing Audio Pipeline...</span></h4>
+    </div>
 
-NOTE_FREQS = {"C4": 261, "D4": 294, "E4": 330, "F4": 349}
+    <script>
+        var statusEl = document.getElementById("status");
+        var audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        var ws = new WebSocket("{NGROK_URL}");
 
+        var NOTE_FREQS = {{"C4": 261.63, "D4": 293.66, "E4": 329.63, "F4": 349.23}};
+        var lastNote = null;
 
-def video_frame_callback(frame):
-    global piano_ws, last_note
+        ws.onopen = function() {{
+            statusEl.innerText = "⚡ Connected to Germany Engine! Click START below.";
+            statusEl.style.color = "#00ff00";
+        }};
 
-    img = frame.to_ndarray(format="bgr24")
-    img = cv2.flip(img, 1)
-    h, w, _ = img.shape
+        ws.onerror = function() {{
+            statusEl.innerText = "❌ Offline. Awaiting backend deployment link...";
+            statusEl.style.color = "#ff0000";
+        }};
 
-    # --- DRAW THE PIANO KEYS VISUAL OVERLAY ---
-    key_w = w // 4
-    keys = ["C4", "D4", "E4", "F4"]
-    for i, note in enumerate(keys):
-        cv2.rectangle(img, (i * key_w, 0), ((i + 1) * key_w, int(h * 0.2)), (255, 255, 255), 2)
-        cv2.putText(img, note, (i * key_w + int(key_w * 0.4), int(h * 0.13)),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+        // Global Synth Engine
+        function playNote(freq) {{
+            if (audioCtx.state === 'suspended') {{
+                audioCtx.resume();
+            }
+            var osc = audioCtx.createOscillator();
+            var gainNode = audioCtx.createGain();
+            osc.type = "sine";
+            osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
+            gainNode.gain.setValueAtTime(0.1, audioCtx.currentTime);
+            gainNode.gain.exponentialRampToValueAtTime(0.00001, audioCtx.currentTime + 0.3);
+            osc.connect(gainNode);
+            gainNode.connect(audioCtx.destination);
+            osc.start();
+            osc.stop(audioCtx.currentTime + 0.3);
+        }}
 
-    if piano_ws is not None:
-        try:
-            _, jpeg_buffer = cv2.imencode('.jpg', img)
-            piano_ws.send_binary(jpeg_buffer.tobytes())
+        // Listen for tracking frame coordinate returns from your backend
+        ws.onmessage = function(event) {{
+            var data = JSON.parse(event.data);
+            if (data.detected && data.note) {{
+                if (data.note !== lastNote) {{
+                    var freq = NOTE_FREQS[data.note];
+                    if (freq) playNote(freq);
+                    lastNote = data.note;
+                }}
+            }} else {{
+                lastNote = null;
+            }}
+        }};
 
-            result = piano_ws.recv()
-            data = json.loads(result)
+        // Intercept WebRTC browser video tracks to pump raw canvas frames down the socket channel
+        navigator.mediaDevices.getUserMedia({{ video: true, audio: false }})
+            .then(function(stream) {{
+                var videoTrack = stream.getVideoTracks()[0];
+                var imageCapture = new ImageCapture(videoTrack);
 
-            if data["detected"]:
-                cx, cy = int(data["x"] * w), int(data["y"] * h)
-                cv2.circle(img, (cx, cy), 8, (0, 255, 0), -1)
+                // Stream loops at 25 FPS natively inside her browser frame
+                setInterval(function() {{
+                    if (ws.readyState === WebSocket.OPEN) {{
+                        imageCapture.grabFrame()
+                            .then(function(imageBitmap) {{
+                                var canvas = document.createElement("canvas");
+                                canvas.width = imageBitmap.width;
+                                canvas.height = imageBitmap.height;
+                                var ctx = canvas.getContext("2d");
+                                ctx.drawImage(imageBitmap, 0, 0);
+                                canvas.toBlob(function(blob) {{
+                                    ws.send(blob);
+                                }}, "image/jpeg", 0.7);
+                            }})
+                            .catch(function(err) {{ }});
+                    }}
+                }}, 40);
+            }});
+    </script>
+""", height=100)
 
-                detected_note = data.get("note")
-                if detected_note and detected_note != last_note:
-                    freq = NOTE_FREQS.get(detected_note)
-                    if freq:
-                        # If running locally on Windows, use system hardware beep
-                        if IS_WINDOWS:
-                            winsound.Beep(freq, 150)
-                        else:
-                            # Natively triggers a clean standard terminal ring sound on Linux cloud hosts
-                            print('\a', end='', flush=True)
-
-                    last_note = detected_note
-                elif not detected_note:
-                    last_note = None
-            else:
-                last_note = None
-
-        except Exception:
-            pass
-
-    return frame.from_ndarray(img, format="bgr24")
-
-
+# --- THE UNIVERSAL STREAMLIT CLOUD HARDWARE CONTEXT WRAPPER ---
+# Includes public STUN configurations so your girlfriend can open this safely from any Wi-Fi network or data plan
 webrtc_streamer(
     key="air-piano-streamer",
     mode=WebRtcMode.SENDRECV,
-    video_frame_callback=video_frame_callback,
     media_stream_constraints={"video": True, "audio": False},
+    rtc_configuration={
+        "iceServers": [{"urls": ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"]}]
+    },
     async_processing=True,
 )
